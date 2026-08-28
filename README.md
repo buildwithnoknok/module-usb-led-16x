@@ -1,21 +1,45 @@
-# noknok LEDs
+# noknok LEDs 16x
 
-A USB-controlled ring of 8 WS2812b RGB LEDs for the noknok ecosystem. The Raspberry Pi
+A USB-controlled **round** ring of 16 RGBW LEDs for the noknok ecosystem. The Raspberry Pi
 Pico drives it as a **USB host**; it can also be driven directly from a PC.
 
+> **Sibling module:** the 8-LED RGB version lives in
+> [`module-usb-led`](https://github.com/buildwithnoknok/module-usb-led). Both are being kept
+> until the 16x boards arrive and the real optical difference (luminosity, colour, power
+> draw) can be measured on the bench.
+
 ## Features
-- 8× WS2812b RGB LEDs (ring)
+- **16× RGBW LEDs** (OPSCO `SKC6812RGBW-NW`, LCSC `C5348912`) — four channels per LED
+  (R, G, B **and a dedicated white**), not three
+- Round board, 96 components, double-sided assembly
 - CH32V203G6U6 microcontroller, USB 1.1 (CDC) device
-- USB-C power + data; 2× Qwiic/Stemma-QT I2C pass-through connectors
+- USB-C power + data; Qwiic/Stemma-QT I2C pass-through
 - **Unique per-unit USB serial** derived from the chip UID — so the Conductor can tell
   identical modules apart and map them to roles (the USB counterpart of the I2C UID)
-- Rich control: per-LED colour/brightness/timed-off in one command, plus 6 built-in
-  animations (rainbow, breathe, theatre chase, colour wipe, twinkle, sundown)
 
 ## Status
-- **Firmware: v1.8.1 — complete** (see [firmware/readme.md](firmware/readme.md) for the
-  full command protocol, flashing instructions, and version history)
-- Hardware: v1.0
+- **Hardware: rev 2.0 — NOT YET FABRICATED.** A 10-piece pilot run is on order.
+- **Firmware: ⚠️ NOT WRITTEN FOR THIS BOARD.**
+
+> ### ⚠️ The firmware in this repo will NOT drive this board
+> `firmware/src/noknok_leds.c` is inherited from the 8× RGB module and is wrong here on
+> three counts:
+> 1. `#define LED_COUNT 8` — this board has **16**
+> 2. `WS_BUF_LEN (LED_COUNT * 24 …)` — 24 bits/LED (GRB). RGBW needs **32 bits/LED (GRBW)**
+> 3. The wire protocol packs **3 bytes per LED** (`cmd_buf[i*3+…]`) — needs a 4th channel
+>
+> Flashed as-is it sends 192 bits where 512 are needed: the first LED or two show garbage
+> and LEDs 3–16 stay dark. It will look like a hardware fault.
+>
+> The source is kept deliberately as the **starting point for the rewrite**, not as a
+> working binary. The 4-byte change also alters the wire format the Conductor uses, so it
+> needs coordinating with `noknok_usb.py` (Sue) — preferably by reporting channel count in
+> the vendor command response rather than hardcoding it per module type.
+>
+> **Also note:** the driver is a hand-rolled TIM2_CH4 + DMA polling bitstream tuned for
+> WS2812b timing. SK6812 timing differs slightly. See the LED Button lesson in `Sam.md` —
+> a marginal waveform perfectly mimics a hardware/component fault. Bench-validate the
+> waveform before concluding anything about the LEDs themselves.
 
 ## How it's controlled
 
