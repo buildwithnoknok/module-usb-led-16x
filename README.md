@@ -31,6 +31,7 @@ Pico drives it as a **USB host**; it can also be driven directly from a PC.
 - **Still to do:** Pico driver (`noknok_usb.py`) for 16 LEDs + white + `GET_STATUS`, and the
   read-only temperature field in the app (Sue); heat test in the real housing; animations aware
   of the 12 + 4 LED layout; port to the two-stage bootloader; rev 2.1 capacitor fix.
+
 ## How it's controlled
 
 ### From a Raspberry Pi Pico (USB host) — the noknok Conductor
