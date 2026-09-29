@@ -18,16 +18,19 @@ Pico drives it as a **USB host**; it can also be driven directly from a PC.
   identical modules apart and map them to roles (the USB counterpart of the I2C UID)
 
 ## Status
-- **Hardware: rev 2.0 — pilot boards received (Sep 2026).** Known issue: a faint audible
-  "rustle" at high brightness (capacitor/board vibration from the LEDs' ~1.1 kHz PWM) —
-  hardware follow-up pending.
-- **Firmware: v2.0.2 — bench-validated 29 Sep 2026** on a pilot board: all 16 LEDs, all four
-  channels, animations, LED-rail power switching, current cap, lossless USB receive. See
-  [`firmware/readme.md`](firmware/readme.md) for the command set, LED layout, flashing and
-  measured power.
-- **Still to do:** Pico driver (`noknok_usb.py`) for 16 LEDs + white; CC-pin / VBUS-aware
-  power budget; animations aware of the 12 + 4 LED layout; port to the two-stage bootloader.
-
+- **Hardware: rev 2.0 — pilot boards received (Sep 2026).** Known issue: an audible "rustle"
+  at high brightness from the 22 µF ceramic capacitors on `+5V` (C29/C36/C37) — fix proposed
+  for rev 2.1 (see [`firmware/readme.md`](firmware/readme.md) → Power).
+- **Firmware: v2.1.1 — bench-validated 29 Sep 2026:** all 16 LEDs × 4 channels, animations,
+  LED-rail power switching, lossless USB receive, and a **power governor** (USB-C CC source
+  limit, VBUS sag protection, **temperature protection** with the chip's calibrated sensor).
+  `0x30 GET_STATUS` reports temperature/power for the app. Updates over USB (OTA).
+- **Heat:** full power (1.8 W) in open air settles at ~57–58 °C chip temperature;
+  measurements in [`docs/measurements/`](docs/measurements/). Thermal thresholds are
+  provisional until measured inside the real housing.
+- **Still to do:** Pico driver (`noknok_usb.py`) for 16 LEDs + white + `GET_STATUS`, and the
+  read-only temperature field in the app (Sue); heat test in the real housing; animations aware
+  of the 12 + 4 LED layout; port to the two-stage bootloader; rev 2.1 capacitor fix.
 ## How it's controlled
 
 ### From a Raspberry Pi Pico (USB host) — the noknok Conductor

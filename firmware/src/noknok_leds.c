@@ -1,5 +1,5 @@
 /*
- * noknok LEDs 16x Module - Firmware v2.1.0 (USBD / FSDEV)
+ * noknok LEDs 16x Module - Firmware v2.1.1 (USBD / FSDEV)
  * MCU:   CH32V203G6U6 (rev 2.0 round board)
  * CLOCK: boots on HSI, manual switch to HSE(24MHz) x2 = 48 MHz (crystal-accurate).
  * USB:   USBD (FSDEV) controller via extralibs/usbd.c - the SAME controller the
@@ -52,6 +52,10 @@
  *     THRESHOLDS ARE FIRST GUESSES until a heat-up curve and VBUS readings exist.
  *   - 0x30 GET_STATUS / 0x3F GET_SENSOR_RAW. The app can show the temperature
  *     (read-only) from 0x30.
+ *
+ * v2.1.1 (29 Sep 2026): FIX - thermal derating never reached a static frame (the
+ *   re-draw compared the budget per 100 ms tick, and slow derating never moved 2 %
+ *   in one tick). Now compared against the budget the LEDs were last drawn with.
  *
  * v1.6 changes:
  *   - UNIQUE USB SERIAL: iSerialNumber is built at boot from the 96-bit chip UID
@@ -120,7 +124,7 @@
 #define PROTOCOL_VERSION  0x01
 #define FW_VERSION_MAJOR  2
 #define FW_VERSION_MINOR  1
-#define FW_VERSION_PATCH  0
+#define FW_VERSION_PATCH  1
 
 /* ============================================================
  * Unique USB serial number (built from chip UID at boot)
@@ -300,6 +304,7 @@ static inline uint8_t scale(uint8_t v) { return (uint16_t)v * brightness / 255; 
 static uint16_t led_budget_ma = LED_BUDGET_DEFAULT_MA;
 static uint16_t led_est_ma;                   /* estimated LED current of the frame on the LEDs */
 static uint8_t  frame_lit;                    /* 1 = the requested frame is not all black */
+static uint16_t shown_budget_ma = LED_BUDGET_DEFAULT_MA;  /* budget the LEDs were last drawn with */
 
 static void show(void) {
     uint8_t grbw[LED_COUNT * LED_CH];
@@ -310,6 +315,7 @@ static void show(void) {
         sum += grbw[i*4+0] + grbw[i*4+1] + grbw[i*4+2] + grbw[i*4+3];
     }
     frame_lit = (sum != 0);
+    shown_budget_ma = led_budget_ma;
     if (sum == 0 || led_budget_ma == 0) {     /* black, or governor cut: blank, then cut power */
         if (rail_on) { memset(grbw, 0, sizeof grbw); ws_show(grbw); }
         led_rail_off();
@@ -444,13 +450,16 @@ static void governor_tick(void) {
     else s_therm_q8 = (uint16_t)(256 - (uint32_t)(256 - T_DERATE_MIN_Q8) * (s_temp_dc - T_DERATE_START_DC)
                                        / (T_DERATE_FULL_DC - T_DERATE_START_DC));
 
-    /* --- combine; re-apply to a lit static frame if the budget moved --- */
+    /* --- combine; re-apply to a lit static frame if the budget moved ---
+     * Compare against the budget the LEDs were last DRAWN with, not the previous
+     * tick: thermal derating moves the budget ~1 mA per tick, which never crossed a
+     * per-tick 2 % threshold, so a static frame was never dimmed (bench 29 Sep 2026). */
     uint16_t b = (s_therm_cut || s_vbus_cut) ? 0
                : (uint16_t)((uint32_t)s_src_budget_ma * s_vbus_q8 / 256u * s_therm_q8 / 256u);
-    uint16_t old = led_budget_ma;
     led_budget_ma = b;
-    uint16_t d = b > old ? b - old : old - b;
-    if (frame_lit && (d * 50u > old || (b == 0) != (old == 0))) show();   /* > 2 % change or cut/uncut */
+    uint16_t a = shown_budget_ma;
+    uint16_t d = b > a ? b - a : a - b;
+    if (frame_lit && (d * 50u > a || (b == 0) != (a == 0))) show();   /* > 2 % from drawn, or cut/uncut */
 }
 
 /* 0x30 GET_STATUS -> 16 bytes, little-endian. Stable layout - the app reads it.

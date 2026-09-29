@@ -57,30 +57,83 @@ a **"noknok LEDs" serial port** then appears.
 | `0xF0` | identity query → module replies `0x4E 0x4E 0x04` |
 | `0xB1` | version query → replies `[PROTOCOL, MAJOR, MINOR, PATCH]` |
 | `0xB0` | enter the USB bootloader (OTA) — no reply, resets |
+| `0x30` | **GET_STATUS** → 16 bytes, see below (v2.1+) |
+| `0x3F` | **GET_SENSOR_RAW** → 18 bytes: temp-cal word, VDDA, raw ADC values (bench/debug) |
 
 An incomplete command is dropped after 50 ms. USB receive is lossless (flow-controlled), so a
 host may send commands back-to-back without pauses.
+
+### `0x30` GET_STATUS reply (16 bytes, little-endian, layout version 1)
+This layout is stable — the app shows the temperature from it (read-only settings field).
+
+| Byte | Type | Meaning |
+|---|---|---|
+| 0 | u8 | layout version (`1`) |
+| 1–2 | i16 | chip (die) temperature in 0.1 °C |
+| 3–4 | u16 | VBUS in mV |
+| 5–6 / 7–8 | u16 | CC1 / CC2 in mV |
+| 9–10 | u16 | LED current budget in mA (`0` = LED power cut by the governor) |
+| 11–12 | u16 | estimated LED current of what is shown now, mA |
+| 13 | u8 | flags: b0 LED power on, b1 thermal cut, b2 VBUS cut, b3 temperature uses factory calibration |
+| 14 | u8 | thermal factor % (100 = not dimmed) |
+| 15 | u8 | VBUS factor % |
+
+## Power governor (v2.1+)
+Ten times per second the firmware measures VBUS, the USB-C CC pins and its own die
+temperature (factory-calibrated internal sensor; VREFINT for true millivolts) and sets the
+LED current budget = **source limit × VBUS factor × thermal factor**:
+- **Source (CC pins, 5.1 k Rd):** standard USB (≤ 0.66 V) → 450 mA · 1.5 A source → 1000 mA ·
+  3 A source → 1000 mA (the board tops out at ~0.7 A anyway).
+- **VBUS:** below 4.40 V the brightness steps down (to min. 20 %), above 4.55 V it recovers;
+  below 4.10 V the LED power is cut (MCU + USB stay alive). *Thresholds not yet validated
+  against a sagging supply.*
+- **Temperature:** dims linearly from **55 °C** to 25 % at **70 °C**; LED power **off at 75 °C**,
+  back on below **65 °C**. The shown colours/animation are kept and return automatically.
+  *Provisional — to be set from a measurement inside the real housing.*
 
 ## Power (measured 29 Sep 2026, rev 2.0, KWS-X1 inline on USB-C)
 | State | Draw |
 |---|---|
 | All off (LED rail switched off) | 0.03 W (~6 mA) |
 | White die only, 16 × 100 % | 0.95 W |
-| Everything requested at 100 % (current cap active) | 1.78 W (~0.35 A) |
+| Everything requested at 100 % (450 mA budget) | 1.78 W (~0.35 A) |
 
-The firmware caps the estimated LED current at 450 mA (model: 12 mA per channel at full,
-measured). Uncapped, all 64 channels would draw ~0.7 A. The cap becomes CC-pin / VBUS aware
-later.
+LED current model: 12 mA per channel at full (measured). Uncapped, all 64 channels would draw
+~0.7 A. **Heat:** at 1.8 W, LED side up in open air, the chip settles at ~57–58 °C after
+~7–10 min; LED side down on cardboard it got much hotter. Curves and details:
+[`../docs/measurements/`](../docs/measurements/).
 
-**Known hardware issue (rev 2.0):** at high brightness a faint "rustle" is audible — the
-SK6812's ~1.1 kHz internal PWM makes the LED supply current pulse, and a ceramic capacitor
-(or the board) vibrates. Touching the PCB damps it. Hardware follow-up pending.
+**Known hardware issue (rev 2.0) — audible "rustle"** at high brightness. The SK6812's
+~1.1 kHz internal PWM makes the supply current pulse and the **22 µF / 25 V X5R 1206 ceramic
+capacitors on `+5V` (C29, C36, C37 — pencil test 29 Sep 2026; C32 barely)** vibrate. Proposed
+for rev 2.1: ≤ 10 µF ceramic on `+5V` (also check the USB 10 µF VBUS inrush limit — 4 × 22 µF
+sit on `+5V` today), bulk moved to `+5V_LED` behind the soft-start load switch, as a
+**polymer** capacitor (no piezo effect). Bench step first: remove C36/C29/C37 one by one and
+re-test.
 
 ---
 
 ## Firmware Change Record
 
-### v2.0.2 — first firmware for the 16x RGBW board (current) — bench-validated 2026-09-29
+### v2.1.1 — power governor + temperature (current) — bench-validated 2026-09-29
+- **ADC sensing, 10× per second:** VBUS (PA0, ×2 divider), CC1/CC2 (PA1/PA2, analog, no
+  pulls), die temperature (ch16, WCH factory calibration word at `0x1FFFF720` =
+  `mV | °C << 16`, slope 4.3 mV/°C — present on this chip: 1395 mV @ 28 °C) and VREFINT
+  (ch17) so readings are true mV. Bench: VBUS read 5.04 V = KWS-X1 5.04 V.
+- **Governor:** LED budget = CC source limit × VBUS factor × thermal factor (see "Power
+  governor" above). A static frame is re-drawn when the budget moves > 2 % from the budget
+  it was drawn with; a cut keeps the frame and restores it automatically.
+- **New commands** `0x30 GET_STATUS` (stable 16-byte layout for the app) and
+  `0x3F GET_SENSOR_RAW` (bench/debug). `tools/bench/status_leds16.py` reads/logs them.
+- **2.1.0 → 2.1.1 fix:** the re-draw compared the budget tick-to-tick (100 ms); slow
+  thermal derating never moved 2 % in one tick, so a static frame was never dimmed (found in
+  the open-air heat log: budget fell to 83 %, estimated current stayed at 449 mA).
+- Verified with a low-threshold TEST build: cut at 54.7 °C → cooled → back on by itself at
+  41.4 °C → dims and holds ~43 °C (`docs/measurements/`). Stress test (300 × `0x14`) PASS.
+- Flashed over USB with `module-USB-bootloader/tools/usb_flash.py` (no programmer).
+  Flash 8360 B (34 %), RAM 2080 B.
+
+### v2.0.2 — first firmware for the 16x RGBW board — bench-validated 2026-09-29
 Bench-validated on a rev 2.0 pilot board (all 16 LEDs, every channel, by eye; KWS-X1 power
 readings above). v2.0.0 / 2.0.1 were bench-only steps on the way, never released.
 - **16 LEDs, RGBW.** 32 bit per LED (G R B W), new white commands `0x11/0x12/0x14/0x18/0x21`;
