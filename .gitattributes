@@ -29,3 +29,8 @@
 *.docx  binary
 *.xlsx  binary
 *.pptx  binary
+
+# Scripts that run on the Pi4 bench host (Linux) - always LF, even on a Windows
+# checkout, or `sh flash_leds16.sh` fails with "$'\r': command not found".
+*.sh    text eol=lf
+*.py    text eol=lf
