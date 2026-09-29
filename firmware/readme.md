@@ -33,9 +33,10 @@ a **"noknok LEDs" serial port** then appears.
 ## Controlling the module
 - From the Pi/PC: bench scripts in [`../tools/bench/`](../tools/bench) (`test_leds16.py`,
   `step_leds16.py`, `stress_leds16.py`).
-- From a Raspberry Pi Pico (USB host): the `NoknokLEDs` class in brain-Pico
-  `software/noknok_usb.py` — **not yet updated for 16 LEDs / white** (needs `LED_COUNT = 16`
-  and the `0x1x` white commands).
+- From a Raspberry Pi Pico (USB host): the `NoknokLEDs16` class in brain-Pico
+  `software/noknok_usb.py` (1.1+, DEV-46) — `c.leds16[0]` in a product. Same calls as the 8×
+  driver plus `w=` (white), `white(level)`, `status()` and `temperature()`. The brain picks
+  the driver from the `0xF0` type byte, so a 16x needs firmware 2.2.0+.
 
 **Command protocol** (raw bytes, host → module). RGB commands set white = 0.
 
