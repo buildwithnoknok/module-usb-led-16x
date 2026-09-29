@@ -1,5 +1,5 @@
 /*
- * noknok LEDs 16x Module - Firmware v2.1.1 (USBD / FSDEV)
+ * noknok LEDs 16x Module - Firmware v2.2.0 (USBD / FSDEV)
  * MCU:   CH32V203G6U6 (rev 2.0 round board)
  * CLOCK: boots on HSI, manual switch to HSE(24MHz) x2 = 48 MHz (crystal-accurate).
  * USB:   USBD (FSDEV) controller via extralibs/usbd.c - the SAME controller the
@@ -57,6 +57,9 @@
  *   re-draw compared the budget per 100 ms tick, and slow derating never moved 2 %
  *   in one tick). Now compared against the budget the LEDs were last drawn with.
  *
+ * v2.2.0 (29 Sep 2026): OWN MODULE TYPE 0x06. 0xF0 now answers 4E 4E 06 (was 04,
+ *   shared with the 8x board). Hosts that only know 0x04 no longer mistake it for an 8x.
+ *
  * v1.6 changes:
  *   - UNIQUE USB SERIAL: iSerialNumber is built at boot from the 96-bit chip UID
  *     (ESIG at 0x1FFFF7E8) -> 24 hex chars, so every module is uniquely
@@ -82,7 +85,7 @@
  *   0x14 [64]                         16x RGBW at once
  *   0x18 i R G B W BR durLo durHi     SET_LED with white
  *   0x21 preset speed R G B W         PLAY_PRESET with white (e.g. SUNDOWN in warm white)
- *   0xF0  -> 4E 4E 04                 identity
+ *   0xF0  -> 4E 4E 06                 identity (0x06 = LEDs 16x; the 8x board is 0x04)
  *   0xB1  -> PROTO MAJ MIN PAT        GET_VERSION
  *   0xB0  -> (no reply)               ENTER_BOOTLOADER: hand off to the noknok USB bootloader (OTA)
  *   0x30  -> 16 bytes                 GET_STATUS: temperature, VBUS, CC, LED budget/current (v2.1)
@@ -122,9 +125,15 @@
  * command range 0xB0-0xBF). PROTOCOL_VERSION = shared noknok protocol level;
  * FW_VERSION_* = this firmware's semver (keep equal to the release tag). */
 #define PROTOCOL_VERSION  0x01
+
+/* noknok module type code (Ecosystem software/enumeration.md 'Module type codes').
+ * 0x06 = noknok LEDs 16x - its OWN board type, decided 29 Sep 2026. The 8x RGB board
+ * is 0x04. USB modules share one app PID (0x4E4E), so this byte in the 0xF0 identity
+ * reply is what tells the brain which driver to use. */
+#define MODULE_TYPE       0x06
 #define FW_VERSION_MAJOR  2
-#define FW_VERSION_MINOR  1
-#define FW_VERSION_PATCH  1
+#define FW_VERSION_MINOR  2
+#define FW_VERSION_PATCH  0
 
 /* ============================================================
  * Unique USB serial number (built from chip UID at boot)
@@ -706,7 +715,7 @@ static void execute(void) {
         case 0x20: cmd_play_preset(a, 0); break;
         case 0x21: cmd_play_preset(a, 1); break;
 
-        case 0xF0: { static const uint8_t id[3]={0x4E,0x4E,0x04}; USBD_SendEndpoint(3, (uint8_t*)id, 3); break; }
+        case 0xF0: { static const uint8_t id[3]={0x4E,0x4E,MODULE_TYPE}; USBD_SendEndpoint(3, (uint8_t*)id, 3); break; }
         case 0xB1: { static const uint8_t ver[4]={PROTOCOL_VERSION,FW_VERSION_MAJOR,FW_VERSION_MINOR,FW_VERSION_PATCH}; USBD_SendEndpoint(3, (uint8_t*)ver, 4); break; }
         case 0xB0: enter_bootloader(); break;  /* ENTER_BOOTLOADER (no reply; resets) */
         case 0x30: send_status(); break;       /* GET_STATUS (temperature, power) */

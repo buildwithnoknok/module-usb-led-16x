@@ -54,7 +54,7 @@ a **"noknok LEDs" serial port** then appears.
 | `0x18 i R G B W BR dLo dHi` | **SET_LED** with white |
 | `0x20 preset speed R G B` | **PLAY_PRESET** 1–6 (rainbow / breathe / theatre-chase / colour-wipe / twinkle / **sundown**); `speed` = ms per step (0 = default) — **EXCEPT preset 6 (sundown), where `speed` means MINUTES instead (0 = default 30)**; `R G B` = base colour |
 | `0x21 preset speed R G B W` | **PLAY_PRESET** with white (e.g. sundown in white) |
-| `0xF0` | identity query → module replies `0x4E 0x4E 0x04` |
+| `0xF0` | identity query → module replies `0x4E 0x4E 0x06` (**module type 0x06 = LEDs 16x**, since v2.2.0; the 8× board is `0x04`) |
 | `0xB1` | version query → replies `[PROTOCOL, MAJOR, MINOR, PATCH]` |
 | `0xB0` | enter the USB bootloader (OTA) — no reply, resets |
 | `0x30` | **GET_STATUS** → 16 bytes, see below (v2.1+) |
@@ -115,7 +115,15 @@ re-test.
 
 ## Firmware Change Record
 
-### v2.1.1 — power governor + temperature (current) — bench-validated 2026-09-29
+### v2.2.0 — own module type 0x06 (current) — 2026-09-29
+- **The 16x is its own board type** (Christopher, 29 Sep 2026): `0xF0` now replies
+  `4E 4E 06` instead of `4E 4E 04` (the 8× RGB board). All noknok USB modules share one app
+  PID (`0x4E4E`), so this byte is what tells the brain which driver to use. Manifest type
+  string: `usb_leds_16x`. Registered in Ecosystem `software/enumeration.md`.
+- No other change. Bench: identity + version read back, stress test PASS, status OK
+  (flashed over USB).
+
+### v2.1.1 — power governor + temperature — bench-validated 2026-09-29
 - **ADC sensing, 10× per second:** VBUS (PA0, ×2 divider), CC1/CC2 (PA1/PA2, analog, no
   pulls), die temperature (ch16, WCH factory calibration word at `0x1FFFF720` =
   `mV | °C << 16`, slope 4.3 mV/°C — present on this chip: 1395 mV @ 28 °C) and VREFINT

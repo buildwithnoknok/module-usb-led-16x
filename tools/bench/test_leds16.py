@@ -20,9 +20,9 @@ def ask(cmd, n):
     s.reset_input_buffer(); s.write(bytes([cmd])); s.flush()
     return list(s.read(n))
 
-print("identity 0xF0 ->", [hex(x) for x in ask(0xF0, 3)])
+print("identity 0xF0 ->", [hex(x) for x in ask(0xF0, 3)], "(expect 4e 4e 06 = LEDs 16x, fw >= 2.2.0)")
 v = ask(0xB1, 4)
-print("version  0xB1 ->", v, "(expect [1, 2, 0, 0])")
+print("version  0xB1 ->", v, "(protocol, major, minor, patch)")
 
 if len(sys.argv) > 1 and sys.argv[1] == "off":
     tx(0x00); sys.exit(0)
