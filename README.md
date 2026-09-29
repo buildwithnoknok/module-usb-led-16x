@@ -18,28 +18,15 @@ Pico drives it as a **USB host**; it can also be driven directly from a PC.
   identical modules apart and map them to roles (the USB counterpart of the I2C UID)
 
 ## Status
-- **Hardware: rev 2.0 — NOT YET FABRICATED.** A 10-piece pilot run is on order.
-- **Firmware: ⚠️ NOT WRITTEN FOR THIS BOARD.**
-
-> ### ⚠️ The firmware in this repo will NOT drive this board
-> `firmware/src/noknok_leds.c` is inherited from the 8× RGB module and is wrong here on
-> three counts:
-> 1. `#define LED_COUNT 8` — this board has **16**
-> 2. `WS_BUF_LEN (LED_COUNT * 24 …)` — 24 bits/LED (GRB). RGBW needs **32 bits/LED (GRBW)**
-> 3. The wire protocol packs **3 bytes per LED** (`cmd_buf[i*3+…]`) — needs a 4th channel
->
-> Flashed as-is it sends 192 bits where 512 are needed: the first LED or two show garbage
-> and LEDs 3–16 stay dark. It will look like a hardware fault.
->
-> The source is kept deliberately as the **starting point for the rewrite**, not as a
-> working binary. The 4-byte change also alters the wire format the Conductor uses, so it
-> needs coordinating with `noknok_usb.py` (Sue) — preferably by reporting channel count in
-> the vendor command response rather than hardcoding it per module type.
->
-> **Also note:** the driver is a hand-rolled TIM2_CH4 + DMA polling bitstream tuned for
-> WS2812b timing. SK6812 timing differs slightly. See the LED Button lesson in `Sam.md` —
-> a marginal waveform perfectly mimics a hardware/component fault. Bench-validate the
-> waveform before concluding anything about the LEDs themselves.
+- **Hardware: rev 2.0 — pilot boards received (Sep 2026).** Known issue: a faint audible
+  "rustle" at high brightness (capacitor/board vibration from the LEDs' ~1.1 kHz PWM) —
+  hardware follow-up pending.
+- **Firmware: v2.0.2 — bench-validated 29 Sep 2026** on a pilot board: all 16 LEDs, all four
+  channels, animations, LED-rail power switching, current cap, lossless USB receive. See
+  [`firmware/readme.md`](firmware/readme.md) for the command set, LED layout, flashing and
+  measured power.
+- **Still to do:** Pico driver (`noknok_usb.py`) for 16 LEDs + white; CC-pin / VBUS-aware
+  power budget; animations aware of the 12 + 4 LED layout; port to the two-stage bootloader.
 
 ## How it's controlled
 
@@ -56,6 +43,7 @@ c = Conductor()
 c.enumerate_usb()          # brings up the USB host port, finds all LED modules
 # (use c.enumerate_all() for a product that mixes I2C + USB modules)
 
+# NOTE: the Pico driver still speaks the 8-LED RGB protocol - 16x/white support pending
 leds = c.leds[0]                                  # or c.by_uid("<serial>"), or c.role["lamp"]
 leds.set_all(255, 0, 0)                           # all red
 leds.set_pixel(3, 0, 255, 0)                      # LED 3 green

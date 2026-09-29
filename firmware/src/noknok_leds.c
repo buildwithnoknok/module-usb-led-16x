@@ -1,5 +1,5 @@
 /*
- * noknok LEDs 16x Module - Firmware v2.0.1 (USBD / FSDEV)
+ * noknok LEDs 16x Module - Firmware v2.0.2 (USBD / FSDEV)
  * MCU:   CH32V203G6U6 (rev 2.0 round board)
  * CLOCK: boots on HSI, manual switch to HSE(24MHz) x2 = 48 MHz (crystal-accurate).
  * USB:   USBD (FSDEV) controller via extralibs/usbd.c - the SAME controller the
@@ -37,6 +37,11 @@
  *     dropped the command byte of a 65-byte 0x14 frame; the colour bytes were then
  *     parsed as commands (0x00 = ALL OFF -> LEDs went dark). Now our own 256 B ring +
  *     USB NAK flow control (see 'USB receive path'). FUNCONF_USE_USBPRINTF = 0.
+ *
+ * v2.0.2 changes (bench calibration, 29 Sep 2026):
+ *   - Current model 20 -> 12 mA per channel at 255 (measured, see 'Current cap').
+ *     Same 450 mA LED budget, but no longer ~2x over-cautious: white die at 100 %
+ *     now runs uncapped; only near-full all-channel frames are limited.
  *
  * v1.6 changes:
  *   - UNIQUE USB SERIAL: iSerialNumber is built at boot from the 96-bit chip UID
@@ -103,7 +108,7 @@
 #define PROTOCOL_VERSION  0x01
 #define FW_VERSION_MAJOR  2
 #define FW_VERSION_MINOR  0
-#define FW_VERSION_PATCH  1
+#define FW_VERSION_PATCH  2
 
 /* ============================================================
  * Unique USB serial number (built from chip UID at boot)
@@ -265,11 +270,15 @@ static uint8_t fr[LED_COUNT], fg[LED_COUNT], fb[LED_COUNT], fw[LED_COUNT];
 static uint8_t brightness = 255;
 static inline uint8_t scale(uint8_t v) { return (uint16_t)v * brightness / 255; }
 
-/* Current cap. Rough model: a channel at 255 draws ~LED_MA_PER_CH mA, linear.
+/* Current cap. Model: a channel at 255 draws ~LED_MA_PER_CH mA, linear.
  * If the frame's total estimate exceeds LED_BUDGET_MA, every channel is scaled
  * down by the same factor (colours keep their ratio). Budget becomes dynamic
- * (CC pins + VBUS sense) in step 3. */
-#define LED_MA_PER_CH   20
+ * (CC pins + VBUS sense) in step 3.
+ * CALIBRATED on the bench 29 Sep 2026 (KWS-X1 inline on USB-C, rev 2.0 board):
+ *   LEDs off (rail off) = 0.03 W; 16x white die @255 = 0.95 W -> ~11.5 mA/channel;
+ *   capped RGBW mix = ~9.7 mA/channel. 12 = worst measured, rounded up.
+ *   => all 64 channels at full would be ~0.7 A uncapped (not the 1.3 A first assumed). */
+#define LED_MA_PER_CH   12
 #define LED_BUDGET_MA   450
 #define LED_BUDGET_SUM  ((uint32_t)LED_BUDGET_MA * 255u / LED_MA_PER_CH)
 
