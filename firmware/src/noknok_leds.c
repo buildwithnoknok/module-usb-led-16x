@@ -1,5 +1,5 @@
 /*
- * noknok LEDs 16x Module - Firmware v2.0.2 (USBD / FSDEV)
+ * noknok LEDs 16x Module - Firmware v2.1.0 (USBD / FSDEV)
  * MCU:   CH32V203G6U6 (rev 2.0 round board)
  * CLOCK: boots on HSI, manual switch to HSE(24MHz) x2 = 48 MHz (crystal-accurate).
  * USB:   USBD (FSDEV) controller via extralibs/usbd.c - the SAME controller the
@@ -43,6 +43,16 @@
  *     Same 450 mA LED budget, but no longer ~2x over-cautious: white die at 100 %
  *     now runs uncapped; only near-full all-channel frames are limited.
  *
+ * v2.1.0 changes (29 Sep 2026) - power governor, first half of 'step 3':
+ *   - ADC1 reads VBUS (PA0), CC1/CC2 (PA1/PA2), die temperature (ch16) and VREFINT
+ *     (ch17, for true mV) 10x per second.
+ *   - LED budget = source limit from the CC pins (default 450 / 1.5 A + 3 A: 1000 mA)
+ *     x VBUS factor (dims while VBUS sags, cuts the LED rail below VBUS_CUT_MV)
+ *     x thermal factor (dims from 55 C, LED rail off at 75 C until < 65 C).
+ *     THRESHOLDS ARE FIRST GUESSES until a heat-up curve and VBUS readings exist.
+ *   - 0x30 GET_STATUS / 0x3F GET_SENSOR_RAW. The app can show the temperature
+ *     (read-only) from 0x30.
+ *
  * v1.6 changes:
  *   - UNIQUE USB SERIAL: iSerialNumber is built at boot from the 96-bit chip UID
  *     (ESIG at 0x1FFFF7E8) -> 24 hex chars, so every module is uniquely
@@ -71,6 +81,8 @@
  *   0xF0  -> 4E 4E 04                 identity
  *   0xB1  -> PROTO MAJ MIN PAT        GET_VERSION
  *   0xB0  -> (no reply)               ENTER_BOOTLOADER: hand off to the noknok USB bootloader (OTA)
+ *   0x30  -> 16 bytes                 GET_STATUS: temperature, VBUS, CC, LED budget/current (v2.1)
+ *   0x3F  -> 18 bytes                 GET_SENSOR_RAW: raw ADC + calibration word (bench/debug)
  *
  * v1.8 changes (OTA-capable, bootloader-hosted):
  *   - App relinked at 0x2000 (app.ld) to run UNDER the noknok USB bootloader
@@ -107,8 +119,8 @@
  * FW_VERSION_* = this firmware's semver (keep equal to the release tag). */
 #define PROTOCOL_VERSION  0x01
 #define FW_VERSION_MAJOR  2
-#define FW_VERSION_MINOR  0
-#define FW_VERSION_PATCH  2
+#define FW_VERSION_MINOR  1
+#define FW_VERSION_PATCH  0
 
 /* ============================================================
  * Unique USB serial number (built from chip UID at boot)
@@ -279,8 +291,15 @@ static inline uint8_t scale(uint8_t v) { return (uint16_t)v * brightness / 255; 
  *   capped RGBW mix = ~9.7 mA/channel. 12 = worst measured, rounded up.
  *   => all 64 channels at full would be ~0.7 A uncapped (not the 1.3 A first assumed). */
 #define LED_MA_PER_CH   12
-#define LED_BUDGET_MA   450
-#define LED_BUDGET_SUM  ((uint32_t)LED_BUDGET_MA * 255u / LED_MA_PER_CH)
+#define LED_BUDGET_DEFAULT_MA  450            /* USB default power (500 mA port) */
+
+/* Set by the power governor (v2.1.0, see 'Sensors + power governor'):
+ *   led_budget_ma = source limit (CC pins) x VBUS headroom x thermal factor.
+ *   0 = LED rail must stay OFF (thermal or VBUS cut) - the frame is kept and comes
+ *   back automatically when the governor releases. */
+static uint16_t led_budget_ma = LED_BUDGET_DEFAULT_MA;
+static uint16_t led_est_ma;                   /* estimated LED current of the frame on the LEDs */
+static uint8_t  frame_lit;                    /* 1 = the requested frame is not all black */
 
 static void show(void) {
     uint8_t grbw[LED_COUNT * LED_CH];
@@ -290,14 +309,20 @@ static void show(void) {
         grbw[i*4+2] = scale(fb[i]); grbw[i*4+3] = scale(fw[i]);
         sum += grbw[i*4+0] + grbw[i*4+1] + grbw[i*4+2] + grbw[i*4+3];
     }
-    if (sum == 0) {                           /* all black: blank the LEDs, then cut power */
-        if (rail_on) ws_show(grbw);
+    frame_lit = (sum != 0);
+    if (sum == 0 || led_budget_ma == 0) {     /* black, or governor cut: blank, then cut power */
+        if (rail_on) { memset(grbw, 0, sizeof grbw); ws_show(grbw); }
         led_rail_off();
+        led_est_ma = 0;
         return;
     }
-    if (sum > LED_BUDGET_SUM)
+    uint32_t limit = (uint32_t)led_budget_ma * 255u / LED_MA_PER_CH;
+    if (sum > limit) {
         for (int i = 0; i < LED_COUNT * LED_CH; i++)
-            grbw[i] = (uint8_t)((uint32_t)grbw[i] * LED_BUDGET_SUM / sum);
+            grbw[i] = (uint8_t)((uint32_t)grbw[i] * limit / sum);
+        sum = limit;
+    }
+    led_est_ma = (uint16_t)(sum * LED_MA_PER_CH / 255u);
     led_rail_on();
     ws_show(grbw);
 }
@@ -305,6 +330,164 @@ static void set_all_w(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
     for (int i = 0; i < LED_COUNT; i++) { fr[i]=r; fg[i]=g; fb[i]=b; fw[i]=w; }
 }
 static void set_all(uint8_t r, uint8_t g, uint8_t b) { set_all_w(r, g, b, 0); }
+
+/* ============================================================
+ * Sensors (ADC1) + power governor (v2.1.0)
+ *
+ * Inputs, read 10x per second:
+ *   PA0  = VBUS via 22k/22k divider (x2)
+ *   PA1  = CC1, PA2 = CC2 - ANALOG IN, NO pull-up/down (a pull would sit in
+ *          parallel with the 5.1k Rd and break USB-C source detection)
+ *   ch16 = internal temperature sensor, ch17 = VREFINT (1.20 V). VREFINT gives
+ *          the real VDDA, so every reading is in true mV, not "fraction of 3.3 V".
+ *
+ * Output: led_budget_ma = source limit (CC) x VBUS factor x thermal factor.
+ *
+ * ⚠ THRESHOLDS ARE FIRST GUESSES (29 Sep 2026), to be set from a measured
+ *   heat-up curve and from VBUS readings compared against a KWS-X1. Deliberately
+ *   on the cautious side. Read everything back with 0x30 / 0x3F.
+ * ============================================================ */
+#define VREFINT_MV          1200
+#define TS_CAL_ADDR         0x1FFFF720u   /* WCH factory word: [15:0] mV, [31:16] deg C (to be verified) */
+#define TS_SLOPE_X10        43            /* 4.3 mV per deg C, voltage FALLS as it gets warmer */
+#define TS_V25_MV_DEFAULT   1430          /* datasheet typical, used if the factory word looks wrong */
+
+/* Thermal (die temperature, 0.1 deg C) */
+#define T_DERATE_START_DC   550           /* start dimming at 55.0 C */
+#define T_DERATE_FULL_DC    700           /* at 70.0 C dimmed to T_DERATE_MIN_Q8 */
+#define T_DERATE_MIN_Q8     64            /* 25 % (Q8: 256 = 100 %) */
+#define T_CUT_DC            750           /* LED power OFF at 75.0 C ... */
+#define T_RESUME_DC         650           /* ... back on below 65.0 C */
+
+/* VBUS (mV) - where PA0 sits relative to the input diode is not yet verified */
+#define VBUS_DERATE_MV      4400          /* below: step brightness down */
+#define VBUS_RECOVER_MV     4550          /* above: step back up */
+#define VBUS_CUT_MV         4100          /* below: LED power OFF (keep MCU + USB alive) */
+
+/* CC pin voltage with the 5.1k Rd (USB-C spec ranges) */
+#define CC_1A5_MV           660           /* >= : source offers 1.5 A */
+#define CC_3A_MV            1230          /* >= : source offers 3.0 A */
+#define LED_BUDGET_1A5_MA   1000
+#define LED_BUDGET_3A_MA    1000          /* the board tops out ~0.7 A anyway; thermal rules */
+
+static uint16_t s_vdda_mv, s_vbus_mv, s_cc1_mv, s_cc2_mv;
+static int16_t  s_temp_dc;                /* filtered die temperature, 0.1 deg C */
+static uint16_t s_raw_ts, s_raw_vref, s_raw_vbus, s_raw_cc1, s_raw_cc2;
+static uint16_t s_src_budget_ma = LED_BUDGET_DEFAULT_MA;
+static uint16_t s_vbus_q8 = 256, s_therm_q8 = 256;   /* Q8 factors, 256 = 100 % */
+static uint8_t  s_therm_cut, s_vbus_cut;
+static uint8_t  s_temp_valid;
+static int16_t  s_ts_ref_mv, s_ts_ref_c;  /* calibration actually in use */
+static uint8_t  s_ts_cal_ok;              /* 1 = factory word used, 0 = datasheet default */
+
+static void adc_init(void) {
+    RCC->APB2PCENR |= RCC_APB2Periph_ADC1 | RCC_APB2Periph_GPIOA;
+    RCC->CFGR0 = (RCC->CFGR0 & ~RCC_ADCPRE) | RCC_ADCPRE_DIV4;       /* 48 / 4 = 12 MHz */
+    GPIOA->CFGLR &= ~(0xFFFUL << 0);                                  /* PA0..PA2 analog, no pulls */
+    ADC1->SAMPTR2 = 0x3FFFFFFF;           /* ch0-9   : 239.5 cycles (~20 us) */
+    ADC1->SAMPTR1 = 0x00FFFFFF;           /* ch10-17 : 239.5 cycles (temp sensor needs >= 17 us) */
+    ADC1->RSQR1   = 0;                    /* one conversion per start */
+    ADC1->CTLR2   = ADC_ADON | ADC_TSVREFE | ADC_EXTSEL | ADC_EXTTRIG;   /* software trigger */
+    Delay_Ms(1);                          /* ADC + temp sensor settle */
+    ADC1->CTLR2 |= ADC_RSTCAL; for (int t = 100000; (ADC1->CTLR2 & ADC_RSTCAL) && t; t--);
+    ADC1->CTLR2 |= ADC_CAL;    for (int t = 100000; (ADC1->CTLR2 & ADC_CAL) && t; t--);
+
+    uint32_t cal = *(volatile uint32_t *)TS_CAL_ADDR;
+    int16_t mv = (int16_t)(cal & 0xFFFF), c = (int16_t)(cal >> 16);
+    s_ts_cal_ok = (mv > 1000 && mv < 1800 && c >= 0 && c <= 60);
+    s_ts_ref_mv = s_ts_cal_ok ? mv : TS_V25_MV_DEFAULT;
+    s_ts_ref_c  = s_ts_cal_ok ? c  : 25;
+}
+
+static uint16_t adc_read(uint8_t ch) {    /* 8-sample average, 12-bit */
+    uint32_t acc = 0;
+    ADC1->RSQR3 = ch;
+    for (int n = 0; n < 8; n++) {
+        ADC1->CTLR2 |= ADC_SWSTART;
+        for (int t = 20000; !(ADC1->STATR & ADC_EOC) && t; t--);
+        acc += ADC1->RDATAR & 0x0FFF;     /* reading RDATAR clears EOC */
+    }
+    return (uint16_t)(acc / 8);
+}
+static inline uint16_t raw_to_mv(uint16_t raw) { return (uint16_t)((uint32_t)raw * s_vdda_mv / 4095u); }
+
+static void governor_tick(void) {
+    /* --- measure --- */
+    s_raw_vref = adc_read(17);
+    s_vdda_mv  = s_raw_vref ? (uint16_t)((uint32_t)VREFINT_MV * 4095u / s_raw_vref) : 3300;
+    s_raw_vbus = adc_read(0);  s_vbus_mv = raw_to_mv(s_raw_vbus) * 2;
+    s_raw_cc1  = adc_read(1);  s_cc1_mv  = raw_to_mv(s_raw_cc1);
+    s_raw_cc2  = adc_read(2);  s_cc2_mv  = raw_to_mv(s_raw_cc2);
+    s_raw_ts   = adc_read(16);
+    int32_t ts_mv = raw_to_mv(s_raw_ts);
+    int16_t t_now = (int16_t)(s_ts_ref_c * 10 - ((ts_mv - s_ts_ref_mv) * 100) / TS_SLOPE_X10);
+    if (!s_temp_valid) { s_temp_dc = t_now; s_temp_valid = 1; }
+    else s_temp_dc += (t_now - s_temp_dc) / 8;          /* ~1 s smoothing */
+
+    /* --- source limit from the CC pins (the higher one is the connected one) --- */
+    uint16_t cc = s_cc1_mv > s_cc2_mv ? s_cc1_mv : s_cc2_mv;
+    s_src_budget_ma = cc >= CC_3A_MV  ? LED_BUDGET_3A_MA
+                    : cc >= CC_1A5_MV ? LED_BUDGET_1A5_MA
+                    : LED_BUDGET_DEFAULT_MA;           /* default USB, or no CC (legacy cable) */
+
+    /* --- VBUS headroom: step down 10 % per tick while sagging, recover 5 % per tick --- */
+    if (s_vbus_mv < VBUS_CUT_MV)          s_vbus_cut = 1;
+    else if (s_vbus_mv > VBUS_RECOVER_MV) s_vbus_cut = 0;
+    if (s_vbus_mv < VBUS_DERATE_MV)       s_vbus_q8 = s_vbus_q8 > 77 ? s_vbus_q8 - 26 : 51;   /* floor 20 % */
+    else if (s_vbus_mv > VBUS_RECOVER_MV) s_vbus_q8 = s_vbus_q8 < 243 ? s_vbus_q8 + 13 : 256;
+
+    /* --- thermal: linear derate, hard cut with hysteresis --- */
+    if (s_temp_dc >= T_CUT_DC)        s_therm_cut = 1;
+    else if (s_temp_dc < T_RESUME_DC) s_therm_cut = 0;
+    if (s_temp_dc <= T_DERATE_START_DC)     s_therm_q8 = 256;
+    else if (s_temp_dc >= T_DERATE_FULL_DC) s_therm_q8 = T_DERATE_MIN_Q8;
+    else s_therm_q8 = (uint16_t)(256 - (uint32_t)(256 - T_DERATE_MIN_Q8) * (s_temp_dc - T_DERATE_START_DC)
+                                       / (T_DERATE_FULL_DC - T_DERATE_START_DC));
+
+    /* --- combine; re-apply to a lit static frame if the budget moved --- */
+    uint16_t b = (s_therm_cut || s_vbus_cut) ? 0
+               : (uint16_t)((uint32_t)s_src_budget_ma * s_vbus_q8 / 256u * s_therm_q8 / 256u);
+    uint16_t old = led_budget_ma;
+    led_budget_ma = b;
+    uint16_t d = b > old ? b - old : old - b;
+    if (frame_lit && (d * 50u > old || (b == 0) != (old == 0))) show();   /* > 2 % change or cut/uncut */
+}
+
+/* 0x30 GET_STATUS -> 16 bytes, little-endian. Stable layout - the app reads it.
+ *   [0]     layout version (1)
+ *   [1..2]  int16  die temperature, 0.1 deg C
+ *   [3..4]  uint16 VBUS mV        [5..6] CC1 mV       [7..8] CC2 mV
+ *   [9..10] uint16 LED budget mA (0 = LED power cut by the governor)
+ *   [11..12]uint16 estimated LED current mA of the current frame
+ *   [13]    flags: b0 LED rail on, b1 thermal cut, b2 VBUS cut, b3 temp from factory cal
+ *   [14]    thermal factor %      [15] VBUS factor %                          */
+static void send_status(void) {
+    uint8_t r[16];
+    r[0] = 1;
+    r[1] = (uint8_t)s_temp_dc;        r[2]  = (uint8_t)((uint16_t)s_temp_dc >> 8);
+    r[3] = (uint8_t)s_vbus_mv;        r[4]  = (uint8_t)(s_vbus_mv >> 8);
+    r[5] = (uint8_t)s_cc1_mv;         r[6]  = (uint8_t)(s_cc1_mv >> 8);
+    r[7] = (uint8_t)s_cc2_mv;         r[8]  = (uint8_t)(s_cc2_mv >> 8);
+    r[9] = (uint8_t)led_budget_ma;    r[10] = (uint8_t)(led_budget_ma >> 8);
+    r[11] = (uint8_t)led_est_ma;      r[12] = (uint8_t)(led_est_ma >> 8);
+    r[13] = (rail_on ? 1 : 0) | (s_therm_cut ? 2 : 0) | (s_vbus_cut ? 4 : 0) | (s_ts_cal_ok ? 8 : 0);
+    r[14] = (uint8_t)((uint32_t)s_therm_q8 * 100u / 256u);
+    r[15] = (uint8_t)((uint32_t)s_vbus_q8 * 100u / 256u);
+    USBD_SendEndpoint(3, r, 16);
+}
+
+/* 0x3F GET_SENSOR_RAW (bench/debug) -> 18 bytes, little-endian:
+ *   [0..3] factory temp-cal word @0x1FFFF720 as read, [4..5] VDDA mV,
+ *   [6..7] raw TS, [8..9] raw VREFINT, [10..11] raw VBUS, [12..13] raw CC1,
+ *   [14..15] raw CC2, [16..17] int16 unfiltered-equivalent: calibration ref mV in use */
+static void send_sensor_raw(void) {
+    uint8_t r[18];
+    uint32_t cal = *(volatile uint32_t *)TS_CAL_ADDR;
+    uint16_t v[7] = { s_vdda_mv, s_raw_ts, s_raw_vref, s_raw_vbus, s_raw_cc1, s_raw_cc2, (uint16_t)s_ts_ref_mv };
+    r[0] = (uint8_t)cal; r[1] = (uint8_t)(cal >> 8); r[2] = (uint8_t)(cal >> 16); r[3] = (uint8_t)(cal >> 24);
+    for (int i = 0; i < 7; i++) { r[4 + i*2] = (uint8_t)v[i]; r[5 + i*2] = (uint8_t)(v[i] >> 8); }
+    USBD_SendEndpoint(3, r, 18);
+}
 
 /* ============================================================
  * Per-LED timed-off (0x10 duration) + animation engine (0x20)
@@ -517,6 +700,8 @@ static void execute(void) {
         case 0xF0: { static const uint8_t id[3]={0x4E,0x4E,0x04}; USBD_SendEndpoint(3, (uint8_t*)id, 3); break; }
         case 0xB1: { static const uint8_t ver[4]={PROTOCOL_VERSION,FW_VERSION_MAJOR,FW_VERSION_MINOR,FW_VERSION_PATCH}; USBD_SendEndpoint(3, (uint8_t*)ver, 4); break; }
         case 0xB0: enter_bootloader(); break;  /* ENTER_BOOTLOADER (no reply; resets) */
+        case 0x30: send_status(); break;       /* GET_STATUS (temperature, power) */
+        case 0x3F: send_sensor_raw(); break;   /* GET_SENSOR_RAW (bench/debug) */
     }
 }
 
@@ -539,6 +724,8 @@ static int cmd_len(uint8_t b) {
         case 0xF0: return 0;
         case 0xB1: return 0;
         case 0xB0: return 0;
+        case 0x30: return 0;
+        case 0x3F: return 0;
         default:   return -1;
     }
 }
@@ -630,6 +817,8 @@ static void rx_poll(void) {
 /* ============================================================
  * Main
  * ============================================================ */
+static uint16_t gov_last;
+
 int main(void) {
     pins_safe_init();         /* PA3 data low, LED rail off, status LED off - FIRST */
     clock_to_hse_48();        /* crystal-accurate 48 MHz first */
@@ -637,6 +826,8 @@ int main(void) {
     USBDSetup();              /* FSDEV USB device (asserts EXTEN_USBD_PU_EN) */
     timebase_init();          /* TIM3 1 ms tick */
     ws_init();                /* re-enables DMA1 after USBDSetup AHBPCENR overwrite */
+    adc_init();               /* VBUS / CC / temperature sensing */
+    governor_tick();          /* valid LED budget before the first frame */
 
     /* Boot flash: dim warm white (W channel only) 300 ms */
     set_all_w(0,0,0,20); show();
@@ -660,6 +851,9 @@ int main(void) {
             }
         }
         if (need_show) show();
+
+        /* Power governor: temperature, VBUS, CC -> LED budget, 10x per second. */
+        if ((uint16_t)(t - gov_last) >= 100) { gov_last = t; governor_tick(); }
 
         /* Service the active animation (0x20). */
         if (anim && (int16_t)(t - anim_last) >= (int16_t)anim_step_ms) {
