@@ -1,5 +1,5 @@
 /*
- * noknok LEDs 16x Module - Firmware v2.0.0 (USBD / FSDEV)
+ * noknok LEDs 16x Module - Firmware v2.0.1 (USBD / FSDEV)
  * MCU:   CH32V203G6U6 (rev 2.0 round board)
  * CLOCK: boots on HSI, manual switch to HSE(24MHz) x2 = 48 MHz (crystal-accurate).
  * USB:   USBD (FSDEV) controller via extralibs/usbd.c - the SAME controller the
@@ -31,6 +31,12 @@
  *     LED_COUNT x 3 = 48 bytes.
  *   - Parser timeout: a command still incomplete after 50 ms is discarded, so a host
  *     that sends a short 0x04 (old 8-LED driver) can't swallow the next command.
+ *
+ * v2.0.1 changes (bench fix, 29 Sep 2026):
+ *   - LOSSLESS USB RECEIVE. usbd.c's printf RX path (64 B buffer, discard-oldest)
+ *     dropped the command byte of a 65-byte 0x14 frame; the colour bytes were then
+ *     parsed as commands (0x00 = ALL OFF -> LEDs went dark). Now our own 256 B ring +
+ *     USB NAK flow control (see 'USB receive path'). FUNCONF_USE_USBPRINTF = 0.
  *
  * v1.6 changes:
  *   - UNIQUE USB SERIAL: iSerialNumber is built at boot from the 96-bit chip UID
@@ -97,7 +103,7 @@
 #define PROTOCOL_VERSION  0x01
 #define FW_VERSION_MAJOR  2
 #define FW_VERSION_MINOR  0
-#define FW_VERSION_PATCH  0
+#define FW_VERSION_PATCH  1
 
 /* ============================================================
  * Unique USB serial number (built from chip UID at boot)
@@ -543,17 +549,73 @@ static void process_byte(uint8_t b) {
     }
 }
 /* ============================================================
- * USBD callbacks
+ * USB receive path (CDC OUT = EP2) - lossless, with USB flow control
+ *
+ * WHY this is ours and not usbd.c's (v2.0.0): usbd.c's built-in receive path
+ * (FUNCONF_USE_USBPRINTF) has a 64-byte buffer that silently DISCARDS THE
+ * OLDEST BYTES when a second packet arrives before the main loop polls. A
+ * 65-byte 0x14 frame (64 + 1 byte packets) lost its command byte, and the
+ * colour bytes were then parsed as commands (0x00 = ALL OFF). Found on the
+ * bench 29 Sep 2026.
+ *
+ * Here: a 256-byte ring filled from the USB interrupt. If fewer than 64 bytes
+ * (one full packet) are free after a packet, the USB interrupt is masked. The
+ * endpoint hardware then NAKs further OUT packets on its own, so the host just
+ * retries - it can never overrun us. The main loop drains the ring and unmasks.
  * ============================================================ */
-/* RX from host (EP2) is delivered here by poll_input(). */
-void handle_usbd_input(int numbytes, uint8_t *data) {
-    for (int i = 0; i < numbytes; i++) process_byte(data[i]);
+#define RX_RING_SIZE   256                     /* power of two */
+#define RX_PKT_MAX     64                      /* full-speed bulk max packet */
+static uint8_t           rx_ring[RX_RING_SIZE];
+static volatile uint16_t rx_head;              /* written by the USB IRQ only */
+static volatile uint16_t rx_tail;              /* written by the main loop only */
+static volatile uint8_t  rx_paused;            /* 1 = USB IRQ masked for flow control */
+
+/* usbd.c callback (USB IRQ context): data arrived on an OUT endpoint. */
+void HandleDataOut(struct _USBState *ctx, int endp, uint8_t *data, int len) {
+    if (endp == 0) { ctx->USBD_SetupReqLen = 0; return; }   /* EP0 data stage: ACK */
+    if (endp != 2) return;
+    uint16_t h = rx_head;
+    for (int i = 0; i < len; i++) rx_ring[h++ & (RX_RING_SIZE - 1)] = data[i];
+    rx_head = h;
+    if (RX_RING_SIZE - (uint16_t)(h - rx_tail) < RX_PKT_MAX) {
+        NVIC_DisableIRQ(USB_LP_CAN1_RX0_IRQn);   /* no room for another packet -> NAK */
+        rx_paused = 1;
+    }
 }
 
-/* ch32fun's USB-printf backend calls this symbol; route it to USBD. */
-int USBFS_SendEndpointNEW(int endp, uint8_t *data, int len, int copy) {
-    (void)copy;
-    return USBD_SendEndpoint(endp, data, len);
+/* usbd.c callback: IN request on an endpoint - nothing queued here. */
+int HandleInRequest(struct _USBState *ctx, int endp, uint8_t *data, int len) {
+    (void)ctx; (void)endp; (void)data; (void)len;
+    return 0;
+}
+
+/* usbd.c callback: CDC class requests (line coding etc.) - accept them all.
+ * Identical to usbd.c's FUNCONF_USE_USBPRINTF version. */
+int HandleSetupCustom(struct _USBState *ctx, int setup_code) {
+    int ret = -1;
+    if (ctx->USBD_SetupReqType & USB_REQ_TYP_CLASS) {
+        switch (setup_code) {
+            case CDC_SET_LINE_CODING:
+            case CDC_SET_LINE_CTLSTE:
+            case CDC_SEND_BREAK:      ret = (ctx->USBD_SetupReqLen) ? ctx->USBD_SetupReqLen : -1; break;
+            case CDC_GET_LINE_CODING: ret = ctx->USBD_SetupReqLen; break;
+            default:                  ret = 0; break;
+        }
+    } else {
+        ret = 0;   /* go to STALL */
+    }
+    return ret;
+}
+
+/* Main loop: take everything received so far, release flow control, then parse.
+ * The IRQ is unmasked BEFORE parsing so replies (0xF0/0xB1 on EP3) can complete. */
+static void rx_poll(void) {
+    uint8_t buf[RX_RING_SIZE];
+    uint16_t t = rx_tail, n = (uint16_t)(rx_head - t);
+    for (uint16_t i = 0; i < n; i++) buf[i] = rx_ring[(t + i) & (RX_RING_SIZE - 1)];
+    rx_tail = t + n;
+    if (rx_paused) { rx_paused = 0; NVIC_EnableIRQ(USB_LP_CAN1_RX0_IRQn); }
+    for (uint16_t i = 0; i < n; i++) process_byte(buf[i]);
 }
 
 /* ============================================================
@@ -573,7 +635,7 @@ int main(void) {
     set_all(0,0,0); show();
 
     while (1) {
-        poll_input();         /* dispatches received bytes to handle_usbd_input */
+        rx_poll();            /* parse everything received over USB since last pass */
 
         uint16_t t = now_ms();
 

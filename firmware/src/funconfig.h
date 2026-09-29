@@ -9,8 +9,12 @@
 #define FUNCONF_PLL_MULTIPLIER     2          // unused at boot, valid to compile
 #define FUNCONF_SYSTEM_CORE_CLOCK  48000000   // actual clock after manual switch
 
-#define FUNCONF_USE_USBPRINTF      1          // enables usbd.c RX path (poll_input/handle_usbd_input)
+#define FUNCONF_USE_USBPRINTF      0          // OFF: usbd.c's RX path drops bytes (64 B buffer,
+                                              // discard-oldest). noknok_leds.c implements the
+                                              // CDC callbacks itself with a ring + USB NAK flow control.
 #define FUNCONF_USE_DEBUGPRINTF    0
+#define FUNCONF_USE_UARTPRINTF     0
+#define FUNCONF_NULL_PRINTF        1          // no printf backend: output is discarded
 #define FUNCONF_DEBUG_HARDFAULT    0          // avoid pulling in PrintHex
 #define FUNCONF_SYSTICK_USE_HCLK   1
 #define FUNCONF_ENABLE_HPE         1
