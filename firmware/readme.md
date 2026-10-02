@@ -83,8 +83,12 @@ This layout is stable — the app shows the temperature from it (read-only setti
 Ten times per second the firmware measures VBUS, the USB-C CC pins and its own die
 temperature (factory-calibrated internal sensor; VREFINT for true millivolts) and sets the
 LED current budget = **source limit × VBUS factor × thermal factor**:
-- **Source (CC pins, 5.1 k Rd):** standard USB (≤ 0.66 V) → 450 mA · 1.5 A source → 1000 mA ·
-  3 A source → 1000 mA (the board tops out at ~0.7 A anyway).
+- **Source (USB-C CC pins):** standard USB (CC ≤ 0.66 V) → 450 mA · 1.5 A source → 1000 mA ·
+  3 A source → 1000 mA (the board tops out at ~0.6 A anyway). The 5.1 k Rd on this board is
+  split into 3.3 k (R20/R21) + 1.8 k (R1/R2), and PA1/PA2 read the middle through 4.7 k (R18/R19),
+  so the ADC sees CC × 1.8/5.1. The firmware scales it back (since v2.2.1). A USB-A port with
+  an A-to-C cable always reports standard USB (the cable's 56 k pull-up), whatever the charger
+  could deliver.
 - **VBUS:** below 4.40 V the brightness steps down (to min. 20 %), above 4.55 V it recovers;
   below 4.10 V the LED power is cut (MCU + USB stay alive). *Thresholds not yet validated
   against a sagging supply.*
@@ -97,14 +101,16 @@ LED current budget = **source limit × VBUS factor × thermal factor**:
 |---|---|
 | All off (LED rail switched off) | 0.03 W (~6 mA) |
 | White die only, 16 × 100 % | 0.95 W |
-| Everything requested at 100 % (450 mA budget) | 1.78 W (~0.35 A) |
+| Everything requested at 100 % on standard USB (450 mA budget) | 1.78 W (~0.35 A) |
+| Everything at 100 % on a 3 A USB-C source (uncapped, v2.2.1) | 2.9 W on the Pi4 path; 3.18 W on a 5 V / 3 A USB-C charger (~0.63 A) |
 
-LED current model: 12 mA per channel at full (measured). Uncapped, all 64 channels would draw
-~0.7 A. **Heat:** at 1.8 W, LED side up in open air, the chip settles at ~57–58 °C after
+LED current model: 12 mA per channel at full, deliberately on the high side (all 64 channels
+estimate 768 mA; measured ~0.63 A). **Heat:** at 1.8 W, LED side up in open air, the chip settles at ~57–58 °C after
 ~7–10 min; LED side down on cardboard it got much hotter. Curves and details:
 [`../docs/measurements/`](../docs/measurements/).
 
-**Known hardware issue (rev 2.0) — audible "rustle"** at high brightness. The SK6812's
+**Known hardware issue (rev 2.0) — audible "rustle"** at partial brightness. It is silent at
+exactly 0 % and 100 %, because the LEDs don't switch there. The SK6812's
 ~1.1 kHz internal PWM makes the supply current pulse and the **22 µF / 25 V X5R 1206 ceramic
 capacitors on `+5V` (C29, C36, C37 — pencil test 29 Sep 2026; C32 barely)** vibrate. Proposed
 for rev 2.1: ≤ 10 µF ceramic on `+5V` (also check the USB 10 µF VBUS inrush limit — 4 × 22 µF
@@ -116,7 +122,17 @@ re-test.
 
 ## Firmware Change Record
 
-### v2.2.0 — own module type 0x06 (current) — 2026-09-29
+### v2.2.1 — CC fix + hard rail check (current) — 2026-10-02 (DEV-28)
+- **Fix: USB-C source detection.** CC1/CC2 are read through the board's 3.3 k / 1.8 k Rd
+  divider, but the firmware compared the divided voltage with the spec thresholds. So a 3 A
+  USB-C charger (CC 1.63 V on the KWS-X1) read 0.57 V, and the budget stayed at 450 mA. Now
+  scaled back to the line voltage. Bench: 3 A source → budget 1000 mA, 0.626 A / 2.9 W (Pi4
+  path) and 0.63 A / 3.18 W (5 V / 3 A USB-C charger). A USB-A charger + A-to-C cable still
+  caps at 1.76 W, as it must. `GET_STATUS` CC values are now real line voltages.
+- **Hard PA3/PB0 rule in the driver:** `ws_show()` refuses to send LED data unless PB0's
+  output register says the LED rail is on.
+
+### v2.2.0 — own module type 0x06 — 2026-09-29
 - **The 16x is its own board type** (Christopher, 29 Sep 2026): `0xF0` now replies
   `4E 4E 06` instead of `4E 4E 04` (the 8× RGB board). All noknok USB modules share one app
   PID (`0x4E4E`), so this byte is what tells the brain which driver to use. Manifest type

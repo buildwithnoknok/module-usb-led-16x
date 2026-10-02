@@ -21,7 +21,7 @@ Pico drives it as a **USB host**; it can also be driven directly from a PC.
 - **Hardware: rev 2.0 — pilot boards received (Sep 2026).** Known issue: an audible "rustle"
   at high brightness from the 22 µF ceramic capacitors on `+5V` (C29/C36/C37) — fix proposed
   for rev 2.1 (see [`firmware/readme.md`](firmware/readme.md) → Power).
-- **Firmware: v2.2.0 (own module type `0x06`) — bench-validated 29 Sep 2026:** all 16 LEDs × 4 channels, animations,
+- **Firmware: v2.2.1 (own module type `0x06`) — bench-validated 2 Oct 2026:** all 16 LEDs × 4 channels, animations,
   LED-rail power switching, lossless USB receive, and a **power governor** (USB-C CC source
   limit, VBUS sag protection, **temperature protection** with the chip's calibrated sensor).
   `0x30 GET_STATUS` reports temperature/power for the app. Updates over USB (OTA).

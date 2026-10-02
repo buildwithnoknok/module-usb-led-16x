@@ -1,5 +1,5 @@
 /*
- * noknok LEDs 16x Module - Firmware v2.2.0 (USBD / FSDEV)
+ * noknok LEDs 16x Module - Firmware v2.2.1 (USBD / FSDEV)
  * MCU:   CH32V203G6U6 (rev 2.0 round board)
  * CLOCK: boots on HSI, manual switch to HSE(24MHz) x2 = 48 MHz (crystal-accurate).
  * USB:   USBD (FSDEV) controller via extralibs/usbd.c - the SAME controller the
@@ -59,6 +59,14 @@
  *
  * v2.2.0 (29 Sep 2026): OWN MODULE TYPE 0x06. 0xF0 now answers 4E 4E 06 (was 04,
  *   shared with the 8x board). Hosts that only know 0x04 no longer mistake it for an 8x.
+ *
+ * v2.2.1 (2 Oct 2026, DEV-28): ws_show() refuses to send LED data unless PB0's output
+ *   register says the LED rail is on - the PA3/PB0 rule is now a hard check in the
+ *   driver, not only a property of how show() is written.
+ *   FIX: CC1/CC2 are read through the board's 3.3k/1.8k Rd divider (PA1/PA2 see
+ *   CC x 1.8/5.1); now scaled back to the real CC voltage. Before, a 3 A USB-C source
+ *   (CC 1.63 V) read 0.57 V and was treated as default USB (budget stuck at 450 mA).
+ *   GET_STATUS CC1/CC2 now report the real line voltage.
  *
  * v1.6 changes:
  *   - UNIQUE USB SERIAL: iSerialNumber is built at boot from the 96-bit chip UID
@@ -133,7 +141,7 @@
 #define MODULE_TYPE       0x06
 #define FW_VERSION_MAJOR  2
 #define FW_VERSION_MINOR  2
-#define FW_VERSION_PATCH  0
+#define FW_VERSION_PATCH  1
 
 /* ============================================================
  * Unique USB serial number (built from chip UID at boot)
@@ -260,6 +268,12 @@ static void ws_init(void) {
 }
 
 static void ws_show(const uint8_t *grbw) {
+    /* HARD INVARIANT (rev 2.0 board, DEV-28): never clock data out on PA3 while the
+     * LED rail is off. U3 (level shifter) is always enabled, so a high on PA3 would
+     * push ~4.9 V into the DIN of unpowered LEDs and back-feed the dead rail. Checked
+     * against the PB0 OUTPUT REGISTER itself, not a software flag, so no caller or
+     * future code path can get around it. */
+    if (!(GPIOB->OUTDR & (1u << 0))) return;
     ws_build_buf(grbw);
     DMA1_Channel2->CFGR  &= ~DMA_CFGR1_EN;
     DMA1->INTFCR = DMA1_IT_TC2;
@@ -426,13 +440,25 @@ static uint16_t adc_read(uint8_t ch) {    /* 8-sample average, 12-bit */
 }
 static inline uint16_t raw_to_mv(uint16_t raw) { return (uint16_t)((uint32_t)raw * s_vdda_mv / 4095u); }
 
+/* CC sense on the rev 2.0 board is NOT the CC pin itself: the 5.1k Rd is split into
+ * 3.3k (R20/R21, connector side) + 1.8k (R1/R2, to GND) and PA1/PA2 tap the middle
+ * through 4.7k (R18/R19, no current flows -> no error). So the ADC sees CC x 1.8/5.1.
+ * Scale back to the real CC line voltage so the USB-C spec thresholds apply.
+ * (Found 2 Oct 2026: a 3 A USB-C charger, CC1 = 1.63 V on the KWS-X1, read as
+ * 0.57 V and was treated as "default USB" -> budget stuck at 450 mA.) */
+#define CC_DIV_TOP_OHM      3300
+#define CC_DIV_BOT_OHM      1800
+static inline uint16_t cc_line_mv(uint16_t raw) {
+    return (uint16_t)((uint32_t)raw_to_mv(raw) * (CC_DIV_TOP_OHM + CC_DIV_BOT_OHM) / CC_DIV_BOT_OHM);
+}
+
 static void governor_tick(void) {
     /* --- measure --- */
     s_raw_vref = adc_read(17);
     s_vdda_mv  = s_raw_vref ? (uint16_t)((uint32_t)VREFINT_MV * 4095u / s_raw_vref) : 3300;
     s_raw_vbus = adc_read(0);  s_vbus_mv = raw_to_mv(s_raw_vbus) * 2;
-    s_raw_cc1  = adc_read(1);  s_cc1_mv  = raw_to_mv(s_raw_cc1);
-    s_raw_cc2  = adc_read(2);  s_cc2_mv  = raw_to_mv(s_raw_cc2);
+    s_raw_cc1  = adc_read(1);  s_cc1_mv  = cc_line_mv(s_raw_cc1);
+    s_raw_cc2  = adc_read(2);  s_cc2_mv  = cc_line_mv(s_raw_cc2);
     s_raw_ts   = adc_read(16);
     int32_t ts_mv = raw_to_mv(s_raw_ts);
     int16_t t_now = (int16_t)(s_ts_ref_c * 10 - ((ts_mv - s_ts_ref_mv) * 100) / TS_SLOPE_X10);
@@ -851,6 +877,12 @@ int main(void) {
     set_all_w(0,0,0,20); show();
     Delay_Ms(300);
     set_all(0,0,0); show();
+#ifdef BENCH_FULL_ON_BOOT
+    /* TEST BUILD ONLY (never release): light everything at full after boot so the
+     * governor can be checked on a power-only source (charger, no USB host). */
+    Delay_Ms(1000);
+    set_all_w(255,255,255,255); show();
+#endif
 
     while (1) {
         rx_poll();            /* parse everything received over USB since last pass */

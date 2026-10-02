@@ -34,4 +34,5 @@ if n == 13: tx(0x03, BR); tx(0x14, *([0,0,0,255]*8 + [255,255,255,0]*8))  # 0-7 
 if n == 14: tx(0x03, 255); tx(0x11, 0, 0, 0, 10)      # white die only, very dim
 if n == 15: tx(0x03, 255); tx(0x11, 0, 10, 0, 0)      # green die only, very dim
 if n == 16: tx(0x03, 255); tx(0x14, *([0,0,0,10]*8 + [0,10,0,0]*8))  # 0-7 dim W, 8-15 dim G
+if n == 17: tx(0x03, 255); tx(0x11, 128, 128, 128, 128)  # all channels at ~50 % PWM: loudest capacitor "rustle"
 print("step", n, "sent")
