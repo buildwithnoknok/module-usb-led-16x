@@ -6,6 +6,9 @@ round board). **Not** for the 8× RGB board — that one lives in `module-usb-le
 - Source: `src/` (built with [ch32fun](https://github.com/cnlohr/ch32fun); `Makefile` uses `extralibs/usbd.c`)
 - Binaries: `bin/noknok_leds.bin` and `bin/noknok_leds.hex` — current release (app only,
   linked at `0x2000`, runs under the noknok USB bootloader)
+- Release index: `index.json` names the current version, URL, size and CRC32 of `bin/noknok_leds.bin`.
+  The brain reads it to decide on OTA updates. Update it in the same commit as the `.bin`
+  ([spec](https://github.com/buildwithnoknok/Ecosystem/blob/main/software/firmware-index.md)).
 - USB identity: VID `0x1209` / PID `0x4E4E` (app) / PID `0x4E42` (bootloader). Appears as a CDC serial device ("noknok LEDs"). Each unit has a **unique serial number** derived from its chip UID.
 
 Firmware is licensed MIT (see `../LICENSE`). Toolchain and protocol follow the
