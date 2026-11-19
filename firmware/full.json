@@ -1,0 +1,29 @@
+{
+  "format": 1,
+  "note": "FULL image for a first flash or recovery over SWD (WCH-LinkE) / WCHISPTool: write it at 0x08000000. It is not an OTA payload - firmware/index.json points at the app image.",
+  "module": "usb_leds_16x",
+  "chip": "ch32v203",
+  "file": "firmware/bin/usb_leds_16x_full.bin",
+  "flash_at": "0x08000000",
+  "size": 32768,
+  "crc32": "f6287c8a",
+  "app": {
+    "source": "firmware/bin/noknok_leds.bin",
+    "version": "2.2.2",
+    "offset": "0x2000",
+    "size": 8488,
+    "crc32": "50912fed"
+  },
+  "bootloader": [
+    {
+      "part": "usb_bootloader",
+      "source": "module-USB-bootloader/firmware/bin/noknok_usb_bootloader.bin",
+      "commit": "7908e59",
+      "offset": "0x0000",
+      "size": 5148,
+      "crc32": "9292e74f",
+      "version": "1.1.0"
+    }
+  ],
+  "metadata_offset": "0x7F00"
+}

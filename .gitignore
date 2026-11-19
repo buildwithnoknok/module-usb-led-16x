@@ -30,3 +30,6 @@ __pycache__/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Released images are tracked (app-only OTA image + full SWD image, DEV-197)
+!firmware/bin/*.bin

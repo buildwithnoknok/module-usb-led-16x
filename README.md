@@ -67,6 +67,26 @@ individually. See **[Ecosystem → enumeration.md](https://github.com/buildwithn
 PowerShell / Python helpers in [`tools/`](tools) (`noknok_leds.ps1`, `noknok_leds_pc.py`)
 auto-detect the module and expose the same commands.
 
+## Flashing a blank or bricked module (full image)
+
+`firmware/bin/usb_leds_16x_full.bin` is the **full image**: the noknok USB bootloader, this firmware and its valid-app marker,
+over the first 32 KB of flash. Use it for a first flash or a recovery, either with a WCH-LinkE on SWD:
+
+```
+minichlink -w firmware/bin/usb_leds_16x_full.bin flash -b
+```
+
+or with the BOOT0 jumper + WCHISPTool, written at `0x08000000`. After that, updates go over USB with the app image
+`firmware/bin/noknok_leds.bin`, which is what `firmware/index.json` points at.
+
+> **Never flash the app image (`noknok_leds.bin`) at `0x08000000`.** It is linked at `0x2000`; written at the flash
+> start it wipes the bootloader and the module no longer starts. Flash the full image to recover.
+
+`firmware/full.json` records which app and bootloader the full image was built from (size and CRC32 of each).
+Rebuild it after every firmware release with `python tools/mk_full_image.py` (needs a clone of
+[module-USB-bootloader](https://github.com/buildwithnoknok/module-USB-bootloader) next to this repo);
+`python tools/mk_full_image.py --check` fails if it no longer matches `firmware/index.json`.
+
 ## Repository Structure
 - `/hardware` — KiCad files, schematics, 3D models
 - `/firmware` — source (`src/`), built binaries (`bin/`), and the firmware change record (`readme.md`)

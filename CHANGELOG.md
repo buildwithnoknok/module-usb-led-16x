@@ -4,6 +4,10 @@ Newest first. One entry per version bump, written in the same commit as the bump
 `## <version> - <date>` then `- DEV-xx - what changed and why. Breaking: yes/no.`
 Convention: Confluence "Development Conventions" (SD space, page 120160257).
 
+## Full image - 2026-11-19
+
+- DEV-197 - new `firmware/bin/usb_leds_16x_full.bin`: the full flash image (USB bootloader 1.1.0 + usb_leds_16x firmware 2.2.2 + valid-app marker) for a first flash or recovery over SWD, recorded in `firmware/full.json`. Built from released parts by the new `tools/mk_full_image.py`; `--check` fails when the full image no longer matches `firmware/index.json`, which still points at the app-only OTA image. README: how to flash it, and why the app image must never go to `0x08000000`. No firmware change. Breaking: no.
+
 ## 2.2.2 - 2026-11-19
 
 - DEV-78 - Fix random LED glitches (one LED off-colour or a whole-ring flash) when frames are re-sent quickly, e.g. a brightness fade: each LED frame now starts from a stopped bit timer with a leading low slot, and interrupts are off for the ~0.9 ms of the frame. Before, ~4-5 % of re-sent frames arrived shifted by one bit. Parser diagnostic counters (0x3E/0x3D) added behind -DDIAG_PARSER, off in the release build. New bench tool `tools/bench/leds16_stream.py` (fast-host 0x03 stream with version checks). Breaking: no.
