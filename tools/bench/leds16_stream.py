@@ -58,7 +58,15 @@ def main():
         r = port.read(4)
         return tuple(r) if len(r) == 4 else None
 
-    v0 = version()
+    v0 = None
+    for _ in range(20):                  # right after a flash/replug the module may not answer yet
+        v0 = version()
+        if v0:
+            break
+        time.sleep(0.5)
+    if not v0:
+        print("FAIL no answer to 0xB1 GET_VERSION")
+        return 1
     print("module", sn, "on", path, "fw", v0)
     port.write(bytes((0x03, 43)) + WARM)
     sent = checks = bad = 0
