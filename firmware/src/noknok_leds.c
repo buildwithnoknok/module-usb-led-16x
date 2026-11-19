@@ -142,6 +142,10 @@
 #define FW_VERSION_MAJOR  2
 #define FW_VERSION_MINOR  2
 #define FW_VERSION_PATCH  1
+#ifdef DIAG_PARSER   /* DEV-78 diagnostic build: same behaviour + parser counters (0x3E/0x3D). Never released. */
+#undef  FW_VERSION_PATCH
+#define FW_VERSION_PATCH  90
+#endif
 
 /* ============================================================
  * Unique USB serial number (built from chip UID at boot)
@@ -642,6 +646,19 @@ static void anim_render(void) {
  * Command parser
  * ============================================================ */
 typedef enum { PARSE_IDLE, PARSE_WAIT } ParseState;
+#ifdef DIAG_PARSER
+/* DEV-78: what the parser really saw. All uint32, sent little-endian by 0x3E (48 bytes), cleared by 0x3D. */
+static struct {
+    uint32_t pkts, bytes;              /* EP2 OUT packets / bytes received (USB IRQ) */
+    uint32_t n03, n10, n11, nother;    /* commands EXECUTED per opcode */
+    uint32_t unknown;                  /* bytes skipped at IDLE because they are not an opcode */
+    uint32_t timeouts;                 /* incomplete commands dropped by CMD_TIMEOUT_MS */
+    uint32_t wait_at_batch_end;        /* a received batch ended in the middle of a command */
+    uint32_t last_unknown4;            /* last 4 unknown bytes, newest in the low byte */
+    uint32_t last_timeout;             /* dropped opcode | got << 8 | need << 16 */
+    uint32_t max_pkt;                  /* biggest OUT packet seen */
+} dg;
+#endif
 static ParseState ps = PARSE_IDLE;
 static uint8_t cmd_byte=0, cmd_buf[LED_COUNT * 4], cmd_need=0, cmd_got=0;
 static uint16_t cmd_start;          /* ms timestamp of the command byte */
@@ -713,6 +730,10 @@ static void cmd_play_preset(const uint8_t *a, uint8_t has_w) {
 
 static void execute(void) {
     const uint8_t *a = cmd_buf;
+#ifdef DIAG_PARSER
+    if (cmd_byte == 0x03) dg.n03++; else if (cmd_byte == 0x10) dg.n10++; else if (cmd_byte == 0x11) dg.n11++;
+    else if (cmd_byte != 0x3E && cmd_byte != 0x3D) dg.nother++;
+#endif
     switch (cmd_byte) {
         case 0x00: cancel_dynamic(); set_all(0,0,0); show(); break;
         case 0x01: cancel_dynamic(); set_all(a[0],a[1],a[2]); show(); break;
@@ -746,6 +767,10 @@ static void execute(void) {
         case 0xB0: enter_bootloader(); break;  /* ENTER_BOOTLOADER (no reply; resets) */
         case 0x30: send_status(); break;       /* GET_STATUS (temperature, power) */
         case 0x3F: send_sensor_raw(); break;   /* GET_SENSOR_RAW (bench/debug) */
+#ifdef DIAG_PARSER
+        case 0x3E: USBD_SendEndpoint(3, (uint8_t*)&dg, sizeof dg); break;   /* DEV-78 parser counters (LE) */
+        case 0x3D: memset(&dg, 0, sizeof dg); break;                        /* reset them */
+#endif
     }
 }
 
@@ -770,6 +795,10 @@ static int cmd_len(uint8_t b) {
         case 0xB0: return 0;
         case 0x30: return 0;
         case 0x3F: return 0;
+#ifdef DIAG_PARSER
+        case 0x3E: return 0;
+        case 0x3D: return 0;
+#endif
         default:   return -1;
     }
 }
@@ -779,7 +808,11 @@ static int cmd_len(uint8_t b) {
 static void process_byte(uint8_t b) {
     if (ps == PARSE_IDLE) {
         int n = cmd_len(b);
+#ifdef DIAG_PARSER
+        if (n < 0) { dg.unknown++; dg.last_unknown4 = (dg.last_unknown4 << 8) | b; return; }
+#else
         if (n < 0) return;
+#endif
         cmd_byte = b; cmd_got = 0; cmd_need = (uint8_t)n;
         cmd_start = now_ms();
         if (cmd_need==0) execute(); else ps=PARSE_WAIT;
@@ -814,6 +847,9 @@ static volatile uint8_t  rx_paused;            /* 1 = USB IRQ masked for flow co
 void HandleDataOut(struct _USBState *ctx, int endp, uint8_t *data, int len) {
     if (endp == 0) { ctx->USBD_SetupReqLen = 0; return; }   /* EP0 data stage: ACK */
     if (endp != 2) return;
+#ifdef DIAG_PARSER
+    dg.pkts++; dg.bytes += (uint32_t)len; if ((uint32_t)len > dg.max_pkt) dg.max_pkt = (uint32_t)len;
+#endif
     uint16_t h = rx_head;
     for (int i = 0; i < len; i++) rx_ring[h++ & (RX_RING_SIZE - 1)] = data[i];
     rx_head = h;
@@ -856,6 +892,9 @@ static void rx_poll(void) {
     rx_tail = t + n;
     if (rx_paused) { rx_paused = 0; NVIC_EnableIRQ(USB_LP_CAN1_RX0_IRQn); }
     for (uint16_t i = 0; i < n; i++) process_byte(buf[i]);
+#ifdef DIAG_PARSER
+    if (n && ps == PARSE_WAIT) dg.wait_at_batch_end++;
+#endif
 }
 
 /* ============================================================
@@ -891,7 +930,12 @@ int main(void) {
 
         /* Drop a command whose payload never completed (e.g. an old host sending
          * the 8-LED 0x04). Otherwise it would swallow the next command. */
-        if (ps == PARSE_WAIT && (uint16_t)(t - cmd_start) > CMD_TIMEOUT_MS) ps = PARSE_IDLE;
+        if (ps == PARSE_WAIT && (uint16_t)(t - cmd_start) > CMD_TIMEOUT_MS) {
+#ifdef DIAG_PARSER
+            dg.timeouts++; dg.last_timeout = cmd_byte | ((uint32_t)cmd_got << 8) | ((uint32_t)cmd_need << 16);
+#endif
+            ps = PARSE_IDLE;
+        }
 
         /* Service per-LED timed-off deadlines (0x10 duration). */
         uint8_t need_show = 0;
