@@ -1,8 +1,8 @@
 {
   "module": "usb_leds_16x",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "url": "https://raw.githubusercontent.com/buildwithnoknok/module-usb-led-16x/main/firmware/bin/noknok_leds.bin",
-  "size": 8428,
-  "crc32": "8fa5dff3",
-  "released": "2026-10-02"
+  "size": 8488,
+  "crc32": "50912fed",
+  "released": "2026-11-19"
 }

@@ -66,6 +66,10 @@
  *   FIX: CC1/CC2 are read through the board's 3.3k/1.8k Rd divider (PA1/PA2 see
  *   CC x 1.8/5.1); now scaled back to the real CC voltage. Before, a 3 A USB-C source
  *   (CC 1.63 V) read 0.57 V and was treated as default USB (budget stuck at 450 mA).
+ *
+ * v2.2.2 (19 Nov 2026, DEV-78): FIX random LED glitches on fast re-sends (one LED
+ *   off-colour / ring flash, ~4-5 % of re-sent frames). Each frame now starts from a
+ *   stopped bit timer with a leading low slot, IRQs off for the ~0.9 ms frame. See ws_show().
  *   GET_STATUS CC1/CC2 now report the real line voltage.
  *
  * v1.6 changes:
@@ -141,10 +145,10 @@
 #define MODULE_TYPE       0x06
 #define FW_VERSION_MAJOR  2
 #define FW_VERSION_MINOR  2
-#define FW_VERSION_PATCH  1
+#define FW_VERSION_PATCH  2
 #ifdef DIAG_PARSER   /* DEV-78 diagnostic build: same behaviour + parser counters (0x3E/0x3D). Never released. */
 #undef  FW_VERSION_PATCH
-#define FW_VERSION_PATCH  90
+#define FW_VERSION_PATCH  91
 #endif
 
 /* ============================================================
@@ -230,12 +234,14 @@ static void pins_safe_init(void) {
 #define WS_T0H         15               /* 0.31 us  (SK6812 spec 0.30 +- 0.15)  */
 #define WS_T1H         29               /* 0.60 us  (SK6812 spec 0.60 +- 0.15)  */
 #define WS_RESET_BITS  80               /* 80 x 1.25 us = 100 us low (>= 80 us) */
-#define WS_BUF_LEN     (LED_COUNT * LED_CH * 8 + WS_RESET_BITS)
+#define WS_LEAD_SLOTS  1                /* DEV-78: one low slot before the first data bit */
+#define WS_BUF_LEN     (WS_LEAD_SLOTS + LED_COUNT * LED_CH * 8 + WS_RESET_BITS)
 
 static uint16_t ws_dma_buf[WS_BUF_LEN] __attribute__((aligned(4)));
 
 static void ws_build_buf(const uint8_t *grbw) {
     uint16_t *p = ws_dma_buf;
+    *p++ = 0;                                          /* lead slot, see ws_show() */
     for (int i = 0; i < LED_COUNT * LED_CH; i++) {
         uint8_t byte = grbw[i];
         for (int bit = 7; bit >= 0; bit--)
@@ -279,12 +285,29 @@ static void ws_show(const uint8_t *grbw) {
      * future code path can get around it. */
     if (!(GPIOB->OUTDR & (1u << 0))) return;
     ws_build_buf(grbw);
+    /* DEV-78 (v2.2.2): every frame starts from a STOPPED bit timer.
+     * Before, the DMA was armed while TIM2 kept running. The update DMA request left
+     * over from the previous frame was then served at a random point of the 1.25 us
+     * bit slot; when that landed on the update itself, the first slot was doubled or
+     * dropped and the whole frame arrived shifted by one bit (bench: ~4-5 % of all
+     * re-sent frames glitched - one LED off-colour or the whole ring flashing - while
+     * the command parser was proven clean, 0x3E counters 3197/3197).
+     * Now: stop the timer (the line stays low, CCR = 0), arm the DMA, restart from
+     * CNT = 0. A stale request can only move the LEAD slot (a 0) into the preload
+     * early - the same value as before - so all data bits get whole, clean slots.
+     * Interrupts are off for the ~0.9 ms of the frame so nothing (USB IRQ) can
+     * delay a DMA transfer past a bit boundary; the USB hardware NAKs meanwhile. */
+    TIM2->CTLR1 &= ~TIM_CEN;
     DMA1_Channel2->CFGR  &= ~DMA_CFGR1_EN;
     DMA1->INTFCR = DMA1_IT_TC2;
     DMA1_Channel2->CNTR  = WS_BUF_LEN;
     DMA1_Channel2->MADDR = (uint32_t)ws_dma_buf;
-    DMA1_Channel2->CFGR |= DMA_CFGR1_EN;      /* starts at the next timer update */
+    DMA1_Channel2->CFGR |= DMA_CFGR1_EN;
+    TIM2->CNT = 0;
+    __disable_irq();
+    TIM2->CTLR1 |= TIM_CEN;                   /* first update in 1.25 us loads the lead slot */
     while (!(DMA1->INTFR & DMA1_IT_TC2));     /* ~0.9 ms for 16 LEDs */
+    __enable_irq();
     DMA1->INTFCR = DMA1_IT_TC2;
     /* The last buffer entries are zeros, so CCR is left at 0 -> line stays low. */
 }

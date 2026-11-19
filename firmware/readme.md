@@ -125,7 +125,19 @@ re-test.
 
 ## Firmware Change Record
 
-### v2.2.1 — CC fix + hard rail check (current) — 2026-10-02 (DEV-28)
+### v2.2.2 — glitch-free LED frames (current) — 2026-11-19 (DEV-78)
+- **Fix: random LED glitches when frames are re-sent quickly** (brightness fades, Smart Lamp
+  Maxi "Sundown"): one LED briefly off-colour or the whole ring flashing. About 4–5 % of all
+  re-sent frames arrived wrong. Cause: the DMA for a new frame was armed while the bit timer
+  kept running, so the first bit slot could be doubled or dropped and the frame arrived shifted
+  by one bit. Now every frame starts from a stopped timer with one leading low slot, and
+  interrupts are held off for the ~0.9 ms the frame takes. The command parser was proven
+  clean (no lost or misread commands). Bench: before 132 glitches in 2829 frames, after 0 in
+  2861 (Pico + Display load); 57,792 commands at 193/s from a Pi with 0 parser errors.
+- A diagnostic build (`-DDIAG_PARSER`, reports x.y.9x, never released) adds parser counters:
+  `0x3E` reads 12 little-endian uint32, `0x3D` clears them. Off in the release build.
+
+### v2.2.1 — CC fix + hard rail check — 2026-10-02 (DEV-28)
 - **Fix: USB-C source detection.** CC1/CC2 are read through the board's 3.3 k / 1.8 k Rd
   divider, but the firmware compared the divided voltage with the spec thresholds. So a 3 A
   USB-C charger (CC 1.63 V on the KWS-X1) read 0.57 V, and the budget stayed at 450 mA. Now
