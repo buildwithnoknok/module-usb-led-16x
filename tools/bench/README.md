@@ -9,3 +9,4 @@
 | `status_leds16.py` | governor status (USB-C CC, VBUS, temperature); `log SECS EVERY FILE` writes a CSV |
 | `stress_leds16.py` | hundreds of back-to-back frames from a fast host; the ring must show the final frame |
 | `heat_run.sh [CSV]` / `heat_stop.sh` | full power + 20 min governor log in the background (housing heat, DEV-55) / stop and switch off (DEV-77: were only on a bench host) |
+| `leds16_stream.py [--seconds S] [--gap G]` | DEV-78: 0x03-only brightness stream from a fast host (~200/s) with a 0xB1 version check every second; any parser desync shows as a bad check. Watch the ring for glitches. |
